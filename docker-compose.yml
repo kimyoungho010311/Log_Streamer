@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  # --------------------------------------------------------------------------
+  # 1. 인프라 저장소 계층 (Infrastructure & Storage Layer)
+  # --------------------------------------------------------------------------
+
+  # PostgreSQL: 메인 로그 적재 및 아웃박스 트랜잭션 관리
+  postgres-db:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql # 컨테이너 최초 구동 시 7개 테이블 자동 생성
+    networks:
+      - liveklass-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d liveklass_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --------------------------------------------------------------------------
+  # 2. 데이터 생성 계층 (Data Generation Layer)
+  # --------------------------------------------------------------------------
+
+  # Python Event Generator: 가중치 기반 실무 시나리오 로그 시뮬레이터
+  python-generator:
+    build:
+      context: ./generator
+      dockerfile: Dockerfile
+    container_name: liveklass_generator
+    environment:
+      - DB_HOST=${DB_HOST}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - PYTHONUNBUFFERED=1  # 파이썬 로그 버퍼를 종료
+    depends_on:
+      postgres-db:
+        condition: service_healthy # DB가 완벽히 켜진 후 로그 생성 시작 (연결 거부 에러 방지)
+    networks:
+      - liveklass-net
+
+  # --------------------------------------------------------------------------
+  # 3. 데이터 관리 및 배치 계층 (Data Orchestration Layer)
+  # --------------------------------------------------------------------------
+
+  # Apache Airflow: S3 가상 이사(백업) 배치 제어 및 아웃박스 워커 역할
+  airflow:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: liveklass_airflow:custom-2.7.2
+    container_name: airflow
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://admin:admin@postgres-db:5432/liveklass_db
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__LOGGING__LOGGING_LEVEL=INFO
+      # AWS S3가 연동될 가상 디렉토리 경로 (향후 K8s 이전 시 S3 URI로 대체될 환경변수)
+      - S3_VIRTUAL_PATH=/opt/airflow/s3_data_lake
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./s3_data_lake:/opt/airflow/s3_data_lake # 로컬 폴더를 S3 파일 저장소 대용으로 마운트
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+    networks:
+      - liveklass-net
+    command: >
+      bash -c "airflow db migrate && 
+      airflow users create --username admin --firstname Youngho --lastname Kim --role Admin --email admin@liveklass.co.kr --password admin && 
+      (airflow scheduler &) && 
+      airflow webserver"
+
+# --------------------------------------------------------------------------
+# 네트워크 및 볼륨 정의
+# --------------------------------------------------------------------------
+networks:
+  liveklass-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
