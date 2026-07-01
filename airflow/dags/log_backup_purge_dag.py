@@ -30,7 +30,7 @@ with DAG(
         logger = logging.getLogger("airflow.task")
         logger.info("BATCH: Initiating log extraction from PostgreSQL to YYYY-MM-DD Partitioned Virtual S3.")
         
-        postgres_hook = PostgresHook(postgres_conn_id='postgres_default')
+        postgres_hook = PostgresHook(postgres_conn_id='postgres_main')
         target_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
         select_query = """
@@ -112,7 +112,7 @@ with DAG(
         target_date = context['ti'].xcom_pull(task_ids='extract_and_backup_to_s3', key='target_date')
         row_count = context['ti'].xcom_pull(task_ids='extract_and_backup_to_s3', key='processed_row_count')
         
-        postgres_hook = PostgresHook(postgres_conn_id='postgres_default')
+        postgres_hook = PostgresHook(postgres_conn_id='postgres_main')
         
         purge_queries = [
             "DELETE FROM payment_tasks WHERE order_id IN (SELECT order_id FROM payment_details WHERE event_id IN (SELECT event_id FROM master_event_logs WHERE created_at <= %s));",
