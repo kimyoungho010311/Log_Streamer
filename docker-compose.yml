@@ -66,11 +66,12 @@ services:
       - AIRFLOW__LOGGING__LOGGING_LEVEL=INFO
       # AWS S3가 연동될 가상 디렉토리 경로 (향후 K8s 이전 시 S3 URI로 대체될 환경변수)
       - S3_VIRTUAL_PATH=/opt/airflow/s3_data_lake
+      - S3_VIRTUAL_PATH=/app/s3_data_lake
     ports:
       - "8080:8080"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
-      - ./s3_data_lake:/opt/airflow/s3_data_lake # 로컬 폴더를 S3 파일 저장소 대용으로 마운트
+      - ./s3_data_lake:/app/s3_data_lake # 로컬 폴더를 S3 파일 저장소 대용으로 마운트
     depends_on:
       postgres-db:
         condition: service_healthy
