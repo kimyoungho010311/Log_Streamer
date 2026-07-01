@@ -60,6 +60,7 @@ services:
     image: liveklass_airflow:custom-2.7.2
     container_name: airflow
     environment:
+      - AIRFLOW_CONN_POSTGRES_MAIN=${AIRFLOW_CONN_POSTGRES_MAIN}
       - AIRFLOW__CORE__EXECUTOR=LocalExecutor
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://admin:admin@postgres-db:5432/liveklass_db
       - AIRFLOW__CORE__LOAD_EXAMPLES=False
