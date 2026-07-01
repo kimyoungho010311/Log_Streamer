@@ -44,6 +44,7 @@ services:
       - PYTHONUNBUFFERED=1  # 파이썬 로그 버퍼를 종료
     volumes:
       - ./analysis:/analysis
+      - ./s3_data_lake:/s3_data_lake
     depends_on:
       postgres-db:
         condition: service_healthy # DB가 완벽히 켜진 후 로그 생성 시작 (연결 거부 에러 방지)
