@@ -6,27 +6,26 @@ import os
 import csv
 import logging
 
-# 1. DAG 기본 설정
 default_args = {
     'owner': 'admin',
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }
 
-# 데이터 레이크의 최상위 루트 경로
+# 로컬 파일 시스템을 S3 데이터 레이크처럼 사용하기 위한 루트 경로입니다.
 S3_VIRTUAL_ROOT = os.getenv("S3_VIRTUAL_PATH", "/opt/airflow/s3_data_lake")
 
 with DAG(
     dag_id='liveklass_log_management_pipeline',
     default_args=default_args,
-    schedule_interval='1 * * * *',  # 실습용 1분 주기 유지
+    schedule_interval='1 * * * *',
     start_date=datetime(2026, 1, 1),
     catchup=False,
     tags=['production', 'database', 'backup'],
 ) as dag:
 
-    # ── TASK 1: PostgreSQL 데이터 추출 및 날짜별(YYYY-MM-DD) 가상 S3 백업 ──
     def extract_and_backup_to_s3(**context):
+        """PostgreSQL 원본 로그를 이벤트 타입과 날짜 기준 CSV 파티션으로 백업합니다."""
         logger = logging.getLogger("airflow.task")
         logger.info("BATCH: Initiating log extraction from PostgreSQL to YYYY-MM-DD Partitioned Virtual S3.")
         
@@ -49,42 +48,33 @@ with DAG(
             context['ti'].xcom_push(key='has_data', value=False)
             return
 
-        # ----------------------------------------------------------------------
-        # [핵심 변경] event_type/YYYY-MM-DD/ 디렉토리 구조로 대통일
-        # ----------------------------------------------------------------------
         processed_count = 0
         
         for row in rows:
             event_id, user_id, creator_id, event_type, created_at = row
             
-            # 1. DB의 created_at 값에서 YYYY-MM-DD 포맷만 추출
             if isinstance(created_at, str):
                 dt_obj = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
             else:
                 dt_obj = created_at
                 
-            date_str = dt_obj.strftime('%Y-%m-%d') # 예: '2026-06-30'
+            date_str = dt_obj.strftime('%Y-%m-%d')
             
-            # 2. 직관적인 디렉토리 경로 생성
-            # 예시 경로: /opt/airflow/s3_data_lake/raw-data/liveklass/page_view/2026-06-30/
+            # event_type/date 구조로 저장해 특정 이벤트와 날짜만 따로 조회할 수 있게 합니다.
             partition_dir = os.path.join(
                 S3_VIRTUAL_ROOT, 
                 "raw-data", 
                 "liveklass", 
                 str(event_type).lower(),
-                date_str  # 👈 YYYY-MM-DD 폴더가 바로 생성됨
+                date_str
             )
             
-            # 3. 디렉토리가 없으면 자동 생성
             os.makedirs(partition_dir, exist_ok=True)
             
-            # 4. 해당 날짜 폴더 안에 저장될 일일 로그 파일 정의
-            # 그날의 데이터가 계속 누적되도록 파일명을 고정하거나 배치의 유니크함을 줍니다.
-            # 여기서는 배치 실행 시간 분 단위까지 묶어 유니크하게 저장하되, 한 날짜 폴더에 다 모이게 만듭니다.
+            # 한 날짜 파티션 안에서 배치 실행 단위별 파일을 구분합니다.
             file_name = f"log_daily_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
             file_path = os.path.join(partition_dir, file_name)
             
-            # 5. 파일이 이미 존재하면 헤더 생략, 없으면 헤더 작성 (Append 모드)
             file_exists = os.path.exists(file_path)
             
             with open(file_path, mode='a', newline='', encoding='utf-8') as f:
@@ -101,8 +91,12 @@ with DAG(
         context['ti'].xcom_push(key='target_date', value=target_date)
         context['ti'].xcom_push(key='processed_row_count', value=processed_count)
 
-    # ── TASK 2: 데이터베이스 원본 데이터 삭제 (기존과 동일) ──
     def purge_database_records(**context):
+        """백업 완료 데이터를 원본 DB에서 정리합니다.
+
+        Airflow가 주기적으로 같은 구간을 다시 백업하지 않도록 처리 완료된 로그를 삭제하고,
+        외래키 제약조건을 지키기 위해 자식 테이블에서 부모 테이블 순서로 정리합니다.
+        """
         logger = logging.getLogger("airflow.task")
         has_data = context['ti'].xcom_pull(task_ids='extract_and_backup_to_s3', key='has_data')
         if not has_data:
@@ -138,8 +132,8 @@ with DAG(
             cursor.close()
             conn.close()
 
-    # ── TASK 3: 최종 모니터링 리포트 ──
     def report_pipeline_metrics(**context):
+        """이번 DAG 실행에서 처리된 행 수를 Airflow 로그에 남깁니다."""
         logger = logging.getLogger("airflow.task")
         has_data = context['ti'].xcom_pull(task_ids='extract_and_backup_to_s3', key='has_data')
         

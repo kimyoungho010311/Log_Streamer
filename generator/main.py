@@ -6,10 +6,9 @@ import psycopg2
 from datetime import datetime
 from dotenv import load_dotenv
 
-# --------------------------------------------------------------------------
-# 1. Logger 가시성 극대화를 위한 컬러 클래스 (이모티콘 제거 및 레벨 표준화)
-# --------------------------------------------------------------------------
 class LogColor:
+    """컨테이너 로그에서 이벤트 종류를 빠르게 구분하기 위한 ANSI 컬러 포맷터."""
+
     GREEN = "\033[92m"
     YELLOW = "\033[93m"
     BLUE = "\033[94m"
@@ -30,28 +29,24 @@ class LogColor:
 
 print(LogColor.success("SYSTEM: LiveKlass Log Generator initialized."))
 
-# 환경변수 로드
 load_dotenv()
 db_host = os.getenv("DB_HOST", "postgres-db")
 db_name = os.getenv("DB_NAME", "liveklass_db")
 db_user = os.getenv("DB_USER", "admin")
 db_password = os.getenv("DB_PASSWORD", "admin")
 
-# --------------------------------------------------------------------------
-# 2. 시뮬레이션용 마스터 데이터셋 정의
-# --------------------------------------------------------------------------
+# 시뮬레이션 대상이 되는 수강생, 강사, 강의 후보군입니다.
 STUDENT_POOL = list(range(1000,3000))
 CREATOR_POOL = list(range(1, 5))
 LECTURE_POOL = list(range(1, 10))
 USER_AGENTS = ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", "Mobile_Safari", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edge/120.0"]
 
-# ==============================================================================
-# 3. 데이터베이스 트랜잭션 적재 계층 (Storage Layer Connection)
-# ==============================================================================
 def get_db_connection():
+    """환경변수에 정의된 PostgreSQL 접속 정보를 사용해 커넥션을 생성합니다."""
     return psycopg2.connect(host=db_host, database=db_name, user=db_user, password=db_password)
 
 def init_master_data():
+    """이벤트 로그가 참조할 수강생과 강사 마스터 데이터를 중복 없이 준비합니다."""
     conn = None
     try:
         conn = get_db_connection()
@@ -77,6 +72,11 @@ def init_master_data():
         if conn: conn.close()
 
 def insert_log_to_db(event_id, user_id, creator_id, event_type, detail_query, detail_params, task_query=None, task_params=None):
+    """공통 이벤트와 상세 이벤트를 하나의 트랜잭션으로 저장합니다.
+
+    결제 성공 이벤트처럼 후속 처리가 필요한 경우에는 같은 트랜잭션 안에서
+    outbox 태스크까지 함께 기록해 데이터 정합성을 맞춥니다.
+    """
     conn = None
     try:
         conn = get_db_connection()
@@ -102,9 +102,6 @@ def insert_log_to_db(event_id, user_id, creator_id, event_type, detail_query, de
     finally:
         if conn: conn.close()
 
-# ==============================================================================
-# 4. 4대 비즈니스 시나리오 엔진 계층 (Engine Layer)
-# ==============================================================================
 def trigger_scenario_1_cart(user_id, creator_id, lecture_id):
     """시나리오 1: 장바구니 담기 (이탈/잔류 분석 데이터 확보 목적)"""
     event_id = str(uuid.uuid4())
@@ -133,7 +130,7 @@ def trigger_scenario_3_buffering(user_id, creator_id, lecture_id):
         print(LogColor.warn(f"METRIC: Media player alert - User {user_id}, Lecture {lecture_id}, Buffering: {duration}s, Agent: {agent[:15]}..."), flush=True)
 
 def trigger_scenario_4_payment(user_id, creator_id):
-    """시나리오 4: 결제 시도 및 트랜잭션 아웃박스 발행 (분산 데이터 정합성 보장 목적)"""
+    """시나리오 4: 결제 시도 및 트랜잭션 아웃박스 발행"""
     event_id = str(uuid.uuid4())
     order_id = f"ORD-{datetime.now().strftime('%Y%m%d')}-{random.randint(100000, 999999)}"
     amount = random.choice([50000, 99000, 150000])
@@ -154,9 +151,6 @@ def trigger_scenario_4_payment(user_id, creator_id):
         else:
             print(LogColor.error(f"TRANSACTION: Payment failed. Order: {order_id}, User: {user_id}, Reason: {error_code}."), flush=True)
 
-# ==============================================================================
-# 5. 가중치 기반 무한 시뮬레이션 루프
-# ==============================================================================
 if __name__ == "__main__":
     init_master_data()
     
@@ -165,6 +159,7 @@ if __name__ == "__main__":
         creator_id = random.choice(CREATOR_POOL)
         lecture_id = random.choice(LECTURE_POOL)
         
+        # 페이지 조회가 가장 자주 발생하고, 결제는 상대적으로 드물게 발생하도록 가중치를 둡니다.
         scenario = random.choices([1, 2, 3, 4], weights=[25, 50, 15, 10], k=1)[0]
         
         if scenario == 1:
