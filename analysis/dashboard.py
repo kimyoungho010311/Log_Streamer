@@ -66,6 +66,21 @@ if not csv_files:
     exit()
 
 df = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)
+for column in [
+    "lecture_id",
+    "referrer",
+    "buffering_duration",
+    "payment_status",
+    "task_status",
+]:
+    if column not in df.columns:
+        df[column] = pd.NA
+
+df["creator_id"] = pd.to_numeric(df["creator_id"], errors="coerce")
+df = df.dropna(subset=["creator_id"])
+df["creator_id"] = df["creator_id"].astype(int)
+df["lecture_id"] = pd.to_numeric(df["lecture_id"], errors="coerce")
+df["buffering_duration"] = pd.to_numeric(df["buffering_duration"], errors="coerce")
 
 if start is not None and end is not None:
     df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", utc=True).dt.tz_localize(None)
@@ -79,53 +94,57 @@ if df.empty:
 sns.set_theme(style="darkgrid")
 fig, axes = plt.subplots(2, 2, figsize=(18, 12))
 
-# 장바구니 수와 결제 수를 비교해 creator 단위의 결제 이탈률을 계산합니다.
-cart_count = df[df['event_type'] == 'cart_add'].groupby('creator_id').size().reset_index(name='cart_count')
-payment_count_by_creator = df[df['event_type'] == 'payment'].groupby('creator_id').size().reset_index(name='payment_count')
-cart_data = cart_count.merge(payment_count_by_creator, on='creator_id', how='left').fillna({'payment_count': 0})
+cart_logs = df[df['event_type'] == 'cart_add'].copy()
+payment_logs = df[df['event_type'] == 'payment'].copy()
+cart_logs['analysis_id'] = cart_logs['creator_id']
+
+cart_count = cart_logs.groupby('analysis_id').size().reset_index(name='cart_count')
+success_payment_logs = payment_logs[payment_logs['payment_status'].fillna('SUCCESS') == 'SUCCESS']
+payment_count_by_group = success_payment_logs.groupby('creator_id').size().reset_index(name='payment_count')
+payment_count_by_group = payment_count_by_group.rename(columns={'creator_id': 'analysis_id'})
+cart_data = cart_count.merge(payment_count_by_group, on='analysis_id', how='left').fillna({'payment_count': 0})
 cart_data['dropout_rate'] = ((cart_data['cart_count'] - cart_data['payment_count']).clip(lower=0) / cart_data['cart_count']) * 100
 
-sns.barplot(data=cart_data, x='creator_id', y='dropout_rate', ax=axes[0, 0], palette='Reds_r')
-axes[0, 0].set_title("Query 1. Cart-to-Payment Dropout Rate by Lecture (%)", fontsize=12, weight='bold')
-axes[0, 0].set_xlabel("Lecture ID (Creator Profile)")
+sns.barplot(data=cart_data, x='analysis_id', y='dropout_rate', hue='analysis_id', ax=axes[0, 0], palette='Reds_r', legend=False)
+axes[0, 0].set_title("Query 1. Cart-to-Payment Dropout Rate by Creator (%)", fontsize=12, weight='bold')
+axes[0, 0].set_xlabel("Creator ID")
 axes[0, 0].set_ylabel("Dropout Rate (%)")
 
-# 유입 채널별 품질 지표를 보여주기 위해 전체 로그 수를 채널 비중으로 나눠 표시합니다.
-total_records = len(df)
-google_cnt = int(total_records * 0.35)
-naver_cnt = int(total_records * 0.25)
-insta_cnt = total_records - (google_cnt + naver_cnt)
+page_view_logs = df[(df['event_type'] == 'page_view') & df['referrer'].notna()]
+buffering_logs = df[df['event_type'].str.contains('buffering|video', case=False, na=False)].copy()
+user_referrers = page_view_logs.drop_duplicates('user_id').set_index('user_id')['referrer']
+buffering_logs['referrer'] = buffering_logs['user_id'].map(user_referrers)
+buffering_logs = buffering_logs.dropna(subset=['referrer'])
+channel_data = buffering_logs.groupby('referrer').size().reset_index(name='buffering_count')
+if channel_data.empty:
+    channel_data = pd.DataFrame({'referrer': ['no_matched_referrer'], 'buffering_count': [0]})
 
-channels = ['google', 'naver', 'instagram']
-channel_counts = [google_cnt, naver_cnt, insta_cnt]
-sns.barplot(x=channels, y=channel_counts, ax=axes[0, 1], palette='viridis')
-axes[0, 1].set_title("Query 2. Video Buffering Incidents by Marketing Channel", fontsize=12, weight='bold')
+sns.barplot(data=channel_data, x='referrer', y='buffering_count', hue='referrer', ax=axes[0, 1], palette='viridis', legend=False)
+axes[0, 1].set_title("Query 2. Video Buffering Incidents by Referrer", fontsize=12, weight='bold')
 axes[0, 1].set_xlabel("Inbound Referrer")
 axes[0, 1].set_ylabel("Incident Count")
 
-# 결제 이벤트와 outbox 태스크 규모를 나란히 보여줘 후속 처리 대기량을 확인합니다.
-payment_count = len(df[df['event_type'] == 'payment'])
+success_payments = payment_logs[payment_logs['payment_status'] == 'SUCCESS']
+payment_count = len(success_payments)
+pending_task_count = len(success_payments[success_payments['task_status'] == 'PENDING'])
 status_data = pd.DataFrame({
     'Metric': ['Success Payments', 'Pending Outbox Tasks'],
-    'Volume': [payment_count, payment_count]
+    'Volume': [payment_count, pending_task_count]
 })
-sns.barplot(data=status_data, x='Metric', y='Volume', ax=axes[1, 0], palette='coolwarm')
-axes[1, 0].set_title("Query 3. Transactional Outbox Stuck Rate (100% Pending Status)", fontsize=12, weight='bold')
+sns.barplot(data=status_data, x='Metric', y='Volume', hue='Metric', ax=axes[1, 0], palette='coolwarm', legend=False)
+axes[1, 0].set_title("Query 3. Pending Outbox Tasks After Successful Payment", fontsize=12, weight='bold')
 axes[1, 0].set_ylabel("Record Count")
 
-# 버퍼링 이벤트가 있는 경우 해당 로그만, 없으면 전체 로그로 대체해 빈 차트를 피합니다.
-buffering_logs = df[df['event_type'].str.contains('buffering|video', case=False, na=False)]
-if buffering_logs.empty:
-    buffering_logs = df
-
-# 크리에이터별 발생량을 기준으로 상위 위험 대상을 뽑습니다.
-real_creator_stats = buffering_logs.groupby('creator_id').size().reset_index(name='incident_volume')
-real_creator_stats = real_creator_stats.sort_values(by='incident_volume', ascending=False).head(5)
+creator_buffering = buffering_logs.dropna(subset=['buffering_duration'])
+real_creator_stats = creator_buffering.groupby('creator_id')['buffering_duration'].mean().reset_index(name='avg_buffering_duration')
+real_creator_stats = real_creator_stats.sort_values(by='avg_buffering_duration', ascending=False).head(5)
+if real_creator_stats.empty:
+    real_creator_stats = pd.DataFrame({'creator_id': [0], 'avg_buffering_duration': [0]})
 
 creators = [f"Creator {int(cid)}" for cid in real_creator_stats['creator_id']]
-durations = real_creator_stats['incident_volume'].tolist()
+durations = real_creator_stats['avg_buffering_duration'].tolist()
 
-sns.barplot(x=durations, y=creators, ax=axes[1, 1], palette='flare', orient='h')
+sns.barplot(x=durations, y=creators, hue=creators, ax=axes[1, 1], palette='flare', orient='h', legend=False)
 axes[1, 1].set_title("Query 4. Avg Video Buffering Duration by Creator (Secs)", fontsize=12, weight='bold')
 axes[1, 1].set_xlabel("Duration (Seconds)")
 

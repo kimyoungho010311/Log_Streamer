@@ -14,6 +14,13 @@ default_args = {
 
 # 로컬 파일 시스템을 S3 데이터 레이크처럼 사용하기 위한 루트 경로입니다.
 S3_VIRTUAL_ROOT = os.getenv("S3_VIRTUAL_PATH", "/opt/airflow/s3_data_lake")
+COMMON_COLUMNS = ['event_id', 'user_id', 'creator_id', 'event_type', 'created_at']
+EVENT_COLUMNS = {
+    'page_view': COMMON_COLUMNS + ['lecture_id', 'referrer'],
+    'cart_add': COMMON_COLUMNS + ['lecture_id'],
+    'video_buffering': COMMON_COLUMNS + ['lecture_id', 'buffering_duration', 'user_agent'],
+    'payment': COMMON_COLUMNS + ['order_id', 'amount', 'payment_status', 'error_code', 'task_status', 'retry_count'],
+}
 
 with DAG(
     dag_id='liveklass_log_management_pipeline',
@@ -33,9 +40,29 @@ with DAG(
         target_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
         select_query = """
-            SELECT event_id, user_id, creator_id, event_type, created_at 
-            FROM master_event_logs 
-            WHERE created_at <= %s;
+            SELECT
+                m.event_id,
+                m.user_id,
+                m.creator_id,
+                m.event_type,
+                m.created_at,
+                COALESCE(pv.lecture_id, ca.lecture_id, vb.lecture_id) AS lecture_id,
+                pv.referrer,
+                vb.buffering_duration,
+                vb.user_agent,
+                pd.order_id,
+                pd.amount,
+                pd.status AS payment_status,
+                pd.error_code,
+                pt.status AS task_status,
+                pt.retry_count
+            FROM master_event_logs m
+            LEFT JOIN page_view_details pv ON m.event_id = pv.event_id
+            LEFT JOIN cart_add_details ca ON m.event_id = ca.event_id
+            LEFT JOIN video_buffering_details vb ON m.event_id = vb.event_id
+            LEFT JOIN payment_details pd ON m.event_id = pd.event_id
+            LEFT JOIN payment_tasks pt ON pd.order_id = pt.order_id
+            WHERE m.created_at <= %s;
         """
         
         conn = postgres_hook.get_conn()
@@ -51,7 +78,25 @@ with DAG(
         processed_count = 0
         
         for row in rows:
-            event_id, user_id, creator_id, event_type, created_at = row
+            event_data = {
+                'event_id': row[0],
+                'user_id': row[1],
+                'creator_id': row[2],
+                'event_type': row[3],
+                'created_at': row[4],
+                'lecture_id': row[5],
+                'referrer': row[6],
+                'buffering_duration': row[7],
+                'user_agent': row[8],
+                'order_id': row[9],
+                'amount': row[10],
+                'payment_status': row[11],
+                'error_code': row[12],
+                'task_status': row[13],
+                'retry_count': row[14],
+            }
+            event_type = event_data['event_type']
+            created_at = event_data['created_at']
             
             if isinstance(created_at, str):
                 dt_obj = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
@@ -78,10 +123,11 @@ with DAG(
             file_exists = os.path.exists(file_path)
             
             with open(file_path, mode='a', newline='', encoding='utf-8') as f:
+                columns = EVENT_COLUMNS.get(str(event_type).lower(), COMMON_COLUMNS)
                 writer = csv.writer(f)
                 if not file_exists:
-                    writer.writerow(['event_id', 'user_id', 'creator_id', 'event_type', 'created_at'])
-                writer.writerow([event_id, user_id, creator_id, event_type, created_at])
+                    writer.writerow(columns)
+                writer.writerow([event_data[column] for column in columns])
                 
             processed_count += 1
             
